@@ -22,28 +22,25 @@ public class SecurityConfig {
     @Bean
     public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
         http
-                // 1. Chống DDoS cơ bản bằng cách giới hạn truy cập và CORS
                 .cors(cors -> cors.configurationSource(corsConfigurationSource()))
-                // 2. Tắt CSRF tạm thời để phát triển (Sẽ cấu hình lại khi deploy)
                 .csrf(csrf -> csrf.disable())
-                // 3. Chống SQL Injection: Spring Security + JPA tự động bảo vệ qua Parameterized Queries
                 .authorizeHttpRequests(auth -> auth
-                        .requestMatchers("/", "/login**", "/error**", "/auth/**").permitAll()
+                        // Mở thêm các đường dẫn API để Frontend gọi được dữ liệu
+                        .requestMatchers("/", "/login**", "/error**", "/auth/**", "/api/**").permitAll()
                         .anyRequest().authenticated()
                 )
-                // 4. Cấu hình Google Login và xử lý lưu Database
                 .oauth2Login(oauth2 -> oauth2
-                        .successHandler(oAuth2SuccessHandler) // Gọi trình xử lý để lưu User vào MySQL
+                        .successHandler(oAuth2SuccessHandler)
                 );
 
         return http.build();
     }
 
-    // Cấu hình CORS cho phép Frontend (Buổi 4) kết nối
     @Bean
     public CorsConfigurationSource corsConfigurationSource() {
         CorsConfiguration configuration = new CorsConfiguration();
-        configuration.setAllowedOrigins(Arrays.asList("http://localhost:3000"));
+        // SỬA LẠI THÀNH 5173 ĐỂ KHỚP VỚI VITE CỦA MẠNH
+        configuration.setAllowedOrigins(Arrays.asList("http://localhost:5173"));
         configuration.setAllowedMethods(Arrays.asList("GET", "POST", "PUT", "DELETE", "OPTIONS"));
         configuration.setAllowedHeaders(Arrays.asList("Authorization", "Content-Type"));
         configuration.setAllowCredentials(true);
