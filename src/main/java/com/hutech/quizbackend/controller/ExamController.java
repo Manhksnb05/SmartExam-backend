@@ -67,11 +67,15 @@ public class ExamController {
         }
     }
 
-    // 4. API: Nộp bài luyện đề (Không lưu điểm)
-    @GetMapping("/practice-submit")
-    public ResponseEntity<PracticeResultDTO> submitPractice(@RequestBody List<PracticeAnswerDTO> userAnswers) {
-        PracticeResultDTO result = examService.checkPracticeAnswers(userAnswers);
-        return ResponseEntity.ok(result);
+    // 4. API: Nộp bài Luyện đề (Chấm điểm & Ghi nhận câu sai/đúng)
+    @PostMapping("/practice-submit")
+    public ResponseEntity<PracticeResultDTO> submitPractice(@RequestBody PracticeRequestDTO request) {
+        try {
+            PracticeResultDTO result = examService.checkPracticeAnswers(request);
+            return ResponseEntity.ok(result);
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(null);
+        }
     }
 
     // 5. API: Xóa mềm nhiều đề thi gốc

@@ -2,6 +2,7 @@ package com.hutech.quizbackend.service.Impl;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.hutech.quizbackend.model.request.QuestionRequestDTO;
 import com.hutech.quizbackend.model.response.AIExplainResponseDTO;
 import com.hutech.quizbackend.entity.Exam;
 import com.hutech.quizbackend.entity.Question;
@@ -156,6 +157,42 @@ public class GeminiService implements IGeminiService {
             errorResponse.setGreeting("Lỗi kết nối Gia sư AI.");
             errorResponse.setCoreExplanation("Hệ thống đang quá tải, vui lòng thử lại sau: " + e.getMessage());
             return errorResponse;
+        }
+    }
+
+    // Tính năng: AI sinh câu hỏi thích ứng (Adaptive Learning)
+    @Override
+    public List<QuestionRequestDTO> generateAdaptiveQuestions(List<String> weakQuestions, int count) {
+        if (weakQuestions == null || weakQuestions.isEmpty()) return new ArrayList<>();
+
+        String url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" + apiKey;
+
+        try {
+            StringBuilder prompt = new StringBuilder();
+            prompt.append("Bạn là giáo viên IT. Một học sinh thường xuyên làm sai các câu hỏi sau:\n");
+            for (int i = 0; i < weakQuestions.size(); i++) {
+                prompt.append(i + 1).append(". ").append(weakQuestions.get(i)).append("\n");
+            }
+            prompt.append("\nHãy sinh ra ĐÚNG ").append(count).append(" câu hỏi trắc nghiệm HOÀN TOÀN MỚI kiểm tra cùng phạm vi kiến thức với các câu trên để học sinh luyện tập thêm.\n");
+
+            // Ép khuôn JSON nghiêm ngặt
+            prompt.append("BẮT BUỘC trả về mảng JSON định dạng sau (không giải thích thêm):\n");
+            prompt.append("[\n  {\n    \"question\": \"...\",\n    \"options\": [\"A. ...\", \"B. ...\", \"C. ...\", \"D. ...\"],\n    \"answer\": \"A\"\n  }\n]");
+
+            Map<String, Object> requestBody = Map.of("contents", List.of(Map.of("parts", List.of(Map.of("text", prompt.toString())))));
+            String rawResponse = new RestTemplate().postForObject(url, requestBody, String.class);
+
+            JsonNode rootNode = objectMapper.readTree(rawResponse);
+            String aiText = rootNode.path("candidates").get(0).path("content").path("parts").get(0).path("text").asText();
+            aiText = aiText.replaceAll("```json", "").replaceAll("```", "").trim();
+
+            JsonNode arrayNode = objectMapper.readTree(aiText);
+            // Chuyển JSON thành List DTO
+            return objectMapper.convertValue(arrayNode, objectMapper.getTypeFactory().constructCollectionType(List.class, QuestionRequestDTO.class));
+
+        } catch (Exception e) {
+            System.err.println("Lỗi khi AI sinh câu hỏi thích ứng: " + e.getMessage());
+            return new ArrayList<>(); // Nếu AI sập, trả về mảng rỗng để luồng code không bị chết (Fallback)
         }
     }
 }

@@ -13,7 +13,7 @@ public interface IExamService {
 
     String updateExamStatus(Long examId, String newStatus);
 
-    PracticeResultDTO checkPracticeAnswers(List<PracticeAnswerDTO> userAnswers);
+    PracticeResultDTO checkPracticeAnswers(PracticeRequestDTO request);
 
     void softDeleteExams(List<Long> ids);
 

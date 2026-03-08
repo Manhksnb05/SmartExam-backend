@@ -8,7 +8,6 @@ public class CustomExamRequestDTO {
     private Integer timeLimit;
     private Integer questionCount;
     private String userEmail;
-
-    // THÊM MỚI: Nhận tên đề thi người dùng tự đặt từ Frontend gửi lên
+    private Long userId; // THÊM DÒNG NÀY ĐỂ ĐỊNH DANH NGƯỜI DÙNG
     private String title;
 }

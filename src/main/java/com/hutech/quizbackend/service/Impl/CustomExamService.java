@@ -3,6 +3,7 @@ package com.hutech.quizbackend.service.Impl;
 import com.hutech.quizbackend.entity.*;
 import com.hutech.quizbackend.model.dto.*;
 import com.hutech.quizbackend.model.request.CustomExamRequestDTO;
+import com.hutech.quizbackend.model.request.QuestionRequestDTO;
 import com.hutech.quizbackend.model.request.SubmitCustomExamRequestDTO;
 import com.hutech.quizbackend.model.response.CustomExamResponseDTO;
 import com.hutech.quizbackend.repository.*;
@@ -37,67 +38,121 @@ public class CustomExamService implements ICustomExamService {
     @Autowired
     private ResultRepository resultRepository;
 
-    // Tính năng: Tạo và lưu bài thi tùy chỉnh
+    @Autowired
+    private UserQuestionStatRepository userQuestionStatRepository;
+
+    @Autowired
+    private GeminiService geminiService;
+
+    // Tính năng: Tạo và lưu bài thi tùy chỉnh dựa trên yếu điểm
     @Override
     @Transactional
     public CustomExamResponseDTO createCustomExam(CustomExamRequestDTO request) {
-        // 1. Tìm bộ đề gốc
         Exam originExam = examRepository.findById(request.getOriginExamId())
                 .orElseThrow(() -> new RuntimeException("Không tìm thấy bộ đề gốc!"));
 
-        // 2. Xử lý tên đề thi tùy chỉnh
-        String customTitle = request.getTitle();
-        if (customTitle == null || customTitle.trim().isEmpty()) {
-            // Nếu Frontend không gửi tên, ta tạo tên mặc định (kèm timestamp để đảm bảo luôn Unique)
-            customTitle = "Thi thử: " + originExam.getTitle() + " - " + System.currentTimeMillis();
-        } else {
-            customTitle = customTitle.trim();
+        // 1. Xử lý tên đề thi (Logic cũ)
+        String customTitle = request.getTitle() != null && !request.getTitle().trim().isEmpty()
+                ? request.getTitle().trim()
+                : "Thi thử: " + originExam.getTitle() + " - " + System.currentTimeMillis();
+
+        if (customExamRepository.existsByTitleAndOriginExamIdAndActiveTrue(customTitle, originExam.getId())) {
+            throw new RuntimeException("Tên đề thi '" + customTitle + "' đã tồn tại!");
         }
 
-        // 3. KIỂM TRA TRÙNG LẶP TÊN (Nghiệp vụ mới nâng cấp)
-        boolean isExist = customExamRepository.existsByTitleAndOriginExamIdAndActiveTrue(customTitle, originExam.getId());
-        if (isExist) {
-            throw new RuntimeException("Tên đề thi '" + customTitle + "' đã tồn tại trong bộ đề này. Vui lòng chọn tên khác!");
-        }
+        int targetCount = request.getQuestionCount();
+        List<Question> finalQuestions = new ArrayList<>();
 
-        // 4. Lấy danh sách câu hỏi & kiểm tra số lượng
-        List<Question> allQuestions = originExam.getQuestions();
-        int actualCount = request.getQuestionCount();
-        if (actualCount > allQuestions.size()) {
-            actualCount = allQuestions.size();
-        }
+        // ==============================================================
+        // PHẦN LÕI: ADAPTIVE LEARNING (HỌC TẬP THÍCH ỨNG)
+        // ==============================================================
 
-        // 5. Xáo trộn và cắt lấy đúng số lượng
-        Collections.shuffle(allQuestions);
-        List<Question> selectedQuestions = allQuestions.stream()
-                .limit(actualCount)
+        // BƯỚC A: Lấy tối đa 3 câu hỏi học sinh làm sai nhiều nhất (>0 lần sai)
+        List<UserQuestionStat> weakStats = userQuestionStatRepository
+                .findByUserIdAndExamIdAndWrongCountGreaterThanOrderByWrongCountDesc(request.getUserId(), originExam.getId(), 0);
+
+        List<Question> weakQuestions = weakStats.stream()
+                .map(UserQuestionStat::getQuestion)
+                .limit(3) // Chỉ lấy 3 câu sai nặng nhất
                 .collect(Collectors.toList());
 
-        // 6. Trích xuất ID
-        String selectedIds = selectedQuestions.stream()
+        finalQuestions.addAll(weakQuestions);
+
+        // BƯỚC B: Gọi AI sinh thêm 2 câu mới dựa trên lỗi sai (Nếu có câu sai)
+        if (!weakQuestions.isEmpty()) {
+            List<String> weakContents = weakQuestions.stream().map(Question::getQuestion).collect(Collectors.toList());
+
+            // Gọi AI sinh 2 câu
+            List<QuestionRequestDTO> aiGeneratedDTOs = geminiService.generateAdaptiveQuestions(weakContents, 2);
+
+            // Lưu câu hỏi mới của AI vào Database (Làm phong phú bộ đề gốc)
+            for (QuestionRequestDTO dto : aiGeneratedDTOs) {
+                Question newQ = new Question();
+                newQ.setQuestion(dto.getQuestion());
+                newQ.setOptions(dto.getOptions());
+
+                // Phòng thủ: Đảm bảo answer chỉ 1 ký tự
+                String ans = dto.getAnswer() != null && !dto.getAnswer().isEmpty() ? dto.getAnswer().substring(0,1).toUpperCase() : "A";
+                newQ.setAnswer(ans);
+
+                newQ.setExam(originExam); // Gắn vào bộ đề gốc
+                newQ = questionRepository.save(newQ); // Lưu DB lấy ID
+
+                finalQuestions.add(newQ); // Nhét vào đề thi hiện tại
+            }
+        }
+
+        // BƯỚC C: Lấp đầy các câu còn thiếu bằng Random
+        int remainingNeeded = targetCount - finalQuestions.size();
+        if (remainingNeeded > 0) {
+            List<Question> allOriginQuestions = new ArrayList<>(originExam.getQuestions());
+
+            // Trừ đi những câu đã được chọn ở Bước A và B để tránh trùng lặp
+            allOriginQuestions.removeAll(finalQuestions);
+
+            Collections.shuffle(allOriginQuestions); // Đảo ngẫu nhiên
+
+            List<Question> randomFills = allOriginQuestions.stream()
+                    .limit(remainingNeeded)
+                    .collect(Collectors.toList());
+            finalQuestions.addAll(randomFills);
+        }
+
+        // BƯỚC D: Chốt danh sách. Nhỡ AI sinh lố hoặc đề gốc không đủ câu, ta cắt cho vừa chuẩn
+        finalQuestions = finalQuestions.stream().limit(targetCount).collect(Collectors.toList());
+
+        // ĐẢO ĐỀ LẦN CUỐI: Giấu nhẹm đi việc câu nào là câu sai, câu nào là AI sinh
+        Collections.shuffle(finalQuestions);
+
+        // ==============================================================
+        // KẾT THÚC PHẦN LÕI
+        // ==============================================================
+
+        // 2. Trích xuất ID và lưu CustomExam
+        String selectedIds = finalQuestions.stream()
                 .map(q -> String.valueOf(q.getId()))
                 .collect(Collectors.joining(","));
 
-        // 7. Tạo và lưu CustomExam
         CustomExam customExam = new CustomExam();
-        customExam.setTitle(customTitle); // Dùng tên đã được xử lý ở bước 2
+        customExam.setTitle(customTitle);
         customExam.setTimeLimit(request.getTimeLimit());
-        customExam.setQuestionCount(actualCount);
+        customExam.setQuestionCount(finalQuestions.size()); // Lưu số lượng thực tế
         customExam.setSelectedQuestionIds(selectedIds);
         customExam.setOriginExam(originExam);
         customExam.setUserEmail(request.getUserEmail());
-
-        customExam.setActive(true); // Thuộc tính phục vụ Xóa mềm
+        customExam.setActive(true);
 
         CustomExam savedExam = customExamRepository.save(customExam);
 
-        // 8. Trả về Response
         CustomExamResponseDTO response = new CustomExamResponseDTO();
         response.setCustomExamId(savedExam.getId());
         response.setTitle(savedExam.getTitle());
         response.setTimeLimit(savedExam.getTimeLimit());
         response.setQuestionCount(savedExam.getQuestionCount());
-        response.setMessage("Tạo đề thi tùy chỉnh thành công!");
+
+        // Trả thêm câu thông báo xịn sò
+        String msg = weakQuestions.isEmpty() ? "Tạo đề ngẫu nhiên thành công!" : "Đã tạo đề thi AI: Tập trung vào điểm yếu của bạn!";
+        response.setMessage(msg);
 
         return response;
     }

@@ -2,11 +2,15 @@ package com.hutech.quizbackend.service.Impl;
 
 import com.hutech.quizbackend.entity.Exam;
 import com.hutech.quizbackend.entity.Question;
+import com.hutech.quizbackend.entity.User;
+import com.hutech.quizbackend.entity.UserQuestionStat;
 import com.hutech.quizbackend.model.dto.*;
 import com.hutech.quizbackend.model.request.QuestionRequestDTO;
 import com.hutech.quizbackend.model.request.SaveExamRequestDTO;
 import com.hutech.quizbackend.repository.ExamRepository;
 import com.hutech.quizbackend.repository.QuestionRepository;
+import com.hutech.quizbackend.repository.UserQuestionStatRepository;
+import com.hutech.quizbackend.repository.UserRepository;
 import com.hutech.quizbackend.service.IExamService;
 import org.apache.poi.xwpf.usermodel.ParagraphAlignment;
 import org.apache.poi.xwpf.usermodel.XWPFDocument;
@@ -30,6 +34,12 @@ public class ExamService implements IExamService {
 
     @Autowired
     private ExamRepository examRepository;
+
+    @Autowired
+    private UserQuestionStatRepository userQuestionStatRepository;
+
+    @Autowired
+    private UserRepository userRepository;
 
     // 1. Logic lấy danh sách bộ đề (Dashboard)
     @Override
@@ -130,37 +140,63 @@ public class ExamService implements IExamService {
         }
     }
 
-    // Tính năng: Chấm điểm Luyện đề (Không lưu Database)
+    // Tính năng: Chấm điểm Luyện đề & Lưu thống kê (Adaptive Learning - Phase 1)
+    @Transactional
     @Override
-    public PracticeResultDTO checkPracticeAnswers(List<PracticeAnswerDTO> userAnswers) {
+    public PracticeResultDTO checkPracticeAnswers(PracticeRequestDTO request) {
+
+        User user = userRepository.findById(request.getUserId())
+                .orElseThrow(() -> new RuntimeException("Không tìm thấy User"));
+        Exam exam = examRepository.findById(request.getExamId())
+                .orElseThrow(() -> new RuntimeException("Không tìm thấy Exam"));
+
         int correctCount = 0;
         List<PracticeFeedbackDTO> details = new ArrayList<>();
 
-        for (PracticeAnswerDTO ans : userAnswers) {
+        for (PracticeAnswerDTO ans : request.getAnswers()) {
             PracticeFeedbackDTO feedback = new PracticeFeedbackDTO();
             feedback.setQuestionId(ans.getQuestionId());
 
-            // Tìm câu hỏi trong DB
             Question q = questionRepository.findById(ans.getQuestionId()).orElse(null);
 
             if (q != null && q.getAnswer() != null && ans.getSelectedOption() != null) {
-                // Kiểm tra đúng sai
                 boolean isCorrect = q.getAnswer().trim().equalsIgnoreCase(ans.getSelectedOption().trim());
                 feedback.setCorrect(isCorrect);
+                if (isCorrect) correctCount++;
+
+                // --- BẮT ĐẦU THEO DÕI LOGIC (TRACKING) ---
+                // Tìm xem user này đã từng làm câu này chưa. Nếu chưa thì tạo mới record.
+                UserQuestionStat stat = userQuestionStatRepository
+                        .findByUserIdAndQuestionId(user.getId(), q.getId())
+                        .orElseGet(() -> {
+                            UserQuestionStat newStat = new UserQuestionStat();
+                            newStat.setUser(user);
+                            newStat.setQuestion(q);
+                            newStat.setExam(exam);
+                            return newStat;
+                        });
+
+                // Cập nhật số đếm
                 if (isCorrect) {
-                    correctCount++;
+                    stat.setCorrectCount(stat.getCorrectCount() + 1);
+                } else {
+                    stat.setWrongCount(stat.getWrongCount() + 1);
                 }
+
+                userQuestionStatRepository.save(stat); // Lưu vào Database
+                // --- KẾT THÚC TRACKING ---
+
             } else {
-                feedback.setCorrect(false); // Nếu không tìm thấy hoặc lỗi thì coi như sai
+                feedback.setCorrect(false);
             }
             details.add(feedback);
         }
 
-        // Gom kết quả trả về
+        // Gom kết quả trả về cho Frontend hiển thị
         PracticeResultDTO result = new PracticeResultDTO();
-        result.setTotalQuestions(userAnswers.size());
+        result.setTotalQuestions(request.getAnswers().size());
         result.setCorrectCount(correctCount);
-        result.setIncorrectCount(userAnswers.size() - correctCount);
+        result.setIncorrectCount(request.getAnswers().size() - correctCount);
         result.setDetails(details);
 
         return result;
