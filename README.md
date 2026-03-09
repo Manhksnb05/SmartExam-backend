@@ -75,3 +75,5 @@ Mọi thay đổi cập nhật tính năng đều được ghi chú rõ ràng. V
 
 ## 📄 7. Giấy phép mã nguồn mở (License)
 Dự án được phát hành dưới Giấy phép MIT License (OSI-approved). Bạn có thể tự do sao chép, chỉnh sửa, phân phối và sử dụng cho mục đích thương mại. Xem chi tiết tại file LICENSE.
+
+Dự án được phát triển bởi Nhóm gồm các thành viên: Nguyễn Đức Mạnh, Lê Hữu Tường, Nguyễn Minh Thành - Trường ĐH Công nghệ TP.HCM (HUTECH)
