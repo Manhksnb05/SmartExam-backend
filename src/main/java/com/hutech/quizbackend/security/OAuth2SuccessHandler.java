@@ -40,6 +40,6 @@ public class OAuth2SuccessHandler extends SimpleUrlAuthenticationSuccessHandler 
         );
         User user = userRepository.findByEmail(email).orElseThrow();
         getRedirectStrategy().sendRedirect(request, response,
-                "http://localhost:5173/?userId=" + user.getId());
+                "http://smartexam.id.vn/?userId=" + user.getId());
     }
 }
