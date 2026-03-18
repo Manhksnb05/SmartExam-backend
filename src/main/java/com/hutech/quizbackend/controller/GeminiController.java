@@ -9,6 +9,8 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.util.Map;
+
 @RestController
 @RequestMapping("/api/ai")
 // Sửa origins để khớp với SecurityConfig và Frontend Vite
@@ -24,7 +26,7 @@ public class GeminiController {
         try {
             if (file.isEmpty()) return ResponseEntity.badRequest().body("Vui lòng chọn file!");
 
-            // Log để Mạnh kiểm tra quá trình xử lý trong Console IntelliJ
+            // Log để kiểm tra quá trình xử lý trong Console IntelliJ
             System.out.println("Đang trích xuất file: " + file.getOriginalFilename());
 
             String extractedText = fileService.extractText(file);
@@ -49,5 +51,16 @@ public class GeminiController {
         catch (Exception e) {
             return ResponseEntity.badRequest().body(e.getMessage());
         }
+    }
+
+    // 3. API: Phân tích lệnh giọng nói
+    @PostMapping("/parse-voice")
+    public ResponseEntity<String> parseVoiceCommand(@RequestBody Map<String, Object> body) {
+        String transcript = (String) body.getOrDefault("transcript", "");
+        int totalQuestions = body.get("totalQuestions") instanceof Number
+                ? ((Number) body.get("totalQuestions")).intValue()
+                : 999;
+        String result = geminiService.parseVoiceCommand(transcript, totalQuestions);
+        return ResponseEntity.ok(result);
     }
 }

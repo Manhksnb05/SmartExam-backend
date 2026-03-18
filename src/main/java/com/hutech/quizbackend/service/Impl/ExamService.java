@@ -41,6 +41,9 @@ public class ExamService implements IExamService {
     @Autowired
     private UserRepository userRepository;
 
+    @Autowired
+    private AIService aiService;
+
     // 1. Logic lấy danh sách bộ đề (Dashboard)
     @Override
     public List<ExamSummaryDTO> getAllActiveExams() {
@@ -86,6 +89,17 @@ public class ExamService implements IExamService {
                 q.setOptions(qDto.getOptions());
                 q.setAnswer(qDto.getAnswer());
                 q.setExam(exam); // Gán ID của bộ đề cho câu hỏi (Quan hệ ManyToOne)
+
+                // ==========================================
+                // 🧠 GỌI AI PHÂN LOẠI ĐỘ KHÓ TRƯỚC KHI LƯU
+                // ==========================================
+                try {
+                    Integer difficulty = aiService.predictDifficulty(qDto.getQuestion());
+                    q.setDifficulty(difficulty);
+                } catch (Exception e) {
+                    q.setDifficulty(0); // Fallback an toàn nếu AI lỗi thì mặc định là Dễ
+                }
+
                 questions.add(q);
             }
         }

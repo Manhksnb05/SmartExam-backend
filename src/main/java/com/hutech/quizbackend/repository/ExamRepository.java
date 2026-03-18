@@ -27,4 +27,7 @@ public interface ExamRepository extends JpaRepository<Exam, Long> {
 
     // Tìm danh sách bộ đề do 1 User tạo, chưa bị xóa, mới nhất xếp trước
     List<Exam> findByUserIdAndActiveTrueOrderByCreatedAtDesc(Long userId);
+
+    // Đếm tổng số đề đang active (dùng cho Admin stats)
+    long countByActiveTrue();
 }

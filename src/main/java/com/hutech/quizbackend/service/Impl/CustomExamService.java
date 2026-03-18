@@ -45,99 +45,161 @@ public class CustomExamService implements ICustomExamService {
     @Autowired
     private GeminiService geminiService;
 
-    // Tính năng: Tạo và lưu bài thi tùy chỉnh dựa trên yếu điểm
+    @Autowired
+    private AIService aiService;
+
     @Override
     @Transactional
     public CustomExamResponseDTO createCustomExam(CustomExamRequestDTO request) {
         Exam originExam = examRepository.findById(request.getOriginExamId())
                 .orElseThrow(() -> new RuntimeException("Không tìm thấy bộ đề gốc!"));
 
-        // 1. Xử lý tên đề thi (Logic cũ)
-        String customTitle = request.getTitle() != null && !request.getTitle().trim().isEmpty()
+        String baseTitle = request.getTitle() != null && !request.getTitle().trim().isEmpty()
                 ? request.getTitle().trim()
-                : "Thi thử: " + originExam.getTitle() + " - " + System.currentTimeMillis();
+                : "Thi thử: " + originExam.getTitle();
 
-        if (customExamRepository.existsByTitleAndOriginExamIdAndActiveTrue(customTitle, originExam.getId())) {
-            throw new RuntimeException("Tên đề thi '" + customTitle + "' đã tồn tại!");
+        String customTitle = baseTitle;
+        int suffix = 1;
+        while (customExamRepository.existsByTitleAndOriginExamIdAndActiveTrue(customTitle, originExam.getId())) {
+            customTitle = baseTitle + " (" + suffix + ")";
+            suffix++;
         }
 
         int targetCount = request.getQuestionCount();
         List<Question> finalQuestions = new ArrayList<>();
 
         // ==============================================================
-        // PHẦN LÕI: ADAPTIVE LEARNING (HỌC TẬP THÍCH ỨNG)
+        // 🛠️ FIX 1: TỰ ĐỘNG DÒ TÌM USER ID NẾU FRONTEND QUÊN GỬI
         // ==============================================================
+        Long validUserId = request.getUserId();
+        if (validUserId == null && request.getUserEmail() != null) {
+            User foundUser = userRepository.findAll().stream()
+                    .filter(u -> request.getUserEmail().equals(u.getEmail()))
+                    .findFirst()
+                    .orElse(null);
+            if (foundUser != null) {
+                validUserId = foundUser.getId();
+            }
+        }
 
-        // BƯỚC A: Lấy tối đa 3 câu hỏi học sinh làm sai nhiều nhất (>0 lần sai)
-        List<UserQuestionStat> weakStats = userQuestionStatRepository
-                .findByUserIdAndExamIdAndWrongCountGreaterThanOrderByWrongCountDesc(request.getUserId(), originExam.getId(), 0);
+        // ==============================================================
+        // KHỐI 1: AI #1 - ĐÁNH GIÁ TRÌNH ĐỘ NGƯỜI DÙNG
+        // ==============================================================
+        int userLevel = 2; // Mặc định là Khá/TB nếu chưa thi bao giờ
+        if (validUserId != null) {
+            Optional<Result> latestResultOpt = resultRepository.findFirstByUserIdOrderByCompletedAtDesc(validUserId);
+            if (latestResultOpt.isPresent()) {
+                Result latestResult = latestResultOpt.get();
+                double recentScore = latestResult.getScore() != null ? latestResult.getScore() : 0.0;
+                int timeTaken = latestResult.getTimeTaken() != null ? latestResult.getTimeTaken() : 0;
 
-        List<Question> weakQuestions = weakStats.stream()
-                .map(UserQuestionStat::getQuestion)
-                .limit(3) // Chỉ lấy 3 câu sai nặng nhất
-                .collect(Collectors.toList());
+                double wrongRatio = 0.0;
+                if (latestResult.getTotalQuestions() != null && latestResult.getTotalQuestions() > 0) {
+                    int wrongAnswers = latestResult.getTotalQuestions() - (latestResult.getCorrectAnswers() != null ? latestResult.getCorrectAnswers() : 0);
+                    wrongRatio = (double) wrongAnswers / latestResult.getTotalQuestions();
+                }
+                userLevel = aiService.predictUserLevel(recentScore, timeTaken, wrongRatio);
+            }
+        }
 
+        // ==============================================================
+        // KHỐI 2: AI #2 - GEMINI SINH CÂU HỎI BÙ LỖ HỔNG
+        // ==============================================================
+        List<UserQuestionStat> weakStats = new ArrayList<>();
+        if (validUserId != null) {
+            weakStats = userQuestionStatRepository
+                    .findByUserIdAndExamIdAndWrongCountGreaterThanOrderByWrongCountDesc(validUserId, originExam.getId(), 0);
+        }
+
+        List<Question> weakQuestions = weakStats.stream().map(UserQuestionStat::getQuestion).limit(3).collect(Collectors.toList());
         finalQuestions.addAll(weakQuestions);
 
-        // BƯỚC B: Gọi AI sinh thêm 2 câu mới dựa trên lỗi sai (Nếu có câu sai)
         if (!weakQuestions.isEmpty()) {
             List<String> weakContents = weakQuestions.stream().map(Question::getQuestion).collect(Collectors.toList());
 
-            // Gọi AI sinh 2 câu
+            // Gọi Gemini sinh câu hỏi
             List<QuestionRequestDTO> aiGeneratedDTOs = geminiService.generateAdaptiveQuestions(weakContents, 2);
 
-            // Lưu câu hỏi mới của AI vào Database (Làm phong phú bộ đề gốc)
             for (QuestionRequestDTO dto : aiGeneratedDTOs) {
                 Question newQ = new Question();
                 newQ.setQuestion(dto.getQuestion());
                 newQ.setOptions(dto.getOptions());
-
-                // Phòng thủ: Đảm bảo answer chỉ 1 ký tự
                 String ans = dto.getAnswer() != null && !dto.getAnswer().isEmpty() ? dto.getAnswer().substring(0,1).toUpperCase() : "A";
                 newQ.setAnswer(ans);
 
-                newQ.setExam(originExam); // Gắn vào bộ đề gốc
-                newQ = questionRepository.save(newQ); // Lưu DB lấy ID
+                int diff = 2; // Mặc định câu vá lỗi là Khó
+                try {
+                    diff = aiService.predictDifficulty(dto.getQuestion());
+                } catch (Exception ignored) {}
 
-                finalQuestions.add(newQ); // Nhét vào đề thi hiện tại
+                newQ.setDifficulty(diff);
+                newQ.setExam(originExam);
+                newQ = questionRepository.save(newQ);
+                finalQuestions.add(newQ);
             }
         }
 
-        // BƯỚC C: Lấp đầy các câu còn thiếu bằng Random
+        // ==============================================================
+        // KHỐI 4: THUẬT TOÁN PHÂN BỔ ĐỀ THI THEO TRÌNH ĐỘ (SMART SHUFFLE)
+        // ==============================================================
         int remainingNeeded = targetCount - finalQuestions.size();
         if (remainingNeeded > 0) {
-            List<Question> allOriginQuestions = new ArrayList<>(originExam.getQuestions());
+            List<Question> availablePool = new ArrayList<>(originExam.getQuestions());
+            availablePool.removeAll(finalQuestions); // Bỏ các câu đã chọn
+            Collections.shuffle(availablePool); // Lắc đều trước khi chọn
 
-            // Trừ đi những câu đã được chọn ở Bước A và B để tránh trùng lặp
-            allOriginQuestions.removeAll(finalQuestions);
+            List<Question> easyPool = availablePool.stream().filter(q -> q.getDifficulty() != null && q.getDifficulty() == 0).collect(Collectors.toList());
+            List<Question> mediumPool = availablePool.stream().filter(q -> q.getDifficulty() != null && q.getDifficulty() == 1).collect(Collectors.toList());
+            List<Question> hardPool = availablePool.stream().filter(q -> q.getDifficulty() != null && q.getDifficulty() == 2).collect(Collectors.toList());
 
-            Collections.shuffle(allOriginQuestions); // Đảo ngẫu nhiên
+            mediumPool.addAll(availablePool.stream().filter(q -> q.getDifficulty() == null).collect(Collectors.toList()));
 
-            List<Question> randomFills = allOriginQuestions.stream()
-                    .limit(remainingNeeded)
-                    .collect(Collectors.toList());
-            finalQuestions.addAll(randomFills);
+            int easyNeeded = 0, medNeeded = 0, hardNeeded = 0;
+            if (userLevel == 1) {
+                easyNeeded = (int) Math.round(remainingNeeded * 0.7);
+                medNeeded = remainingNeeded - easyNeeded;
+            } else if (userLevel == 3) {
+                hardNeeded = (int) Math.round(remainingNeeded * 0.6);
+                medNeeded = (int) Math.round(remainingNeeded * 0.3);
+                easyNeeded = remainingNeeded - hardNeeded - medNeeded;
+            } else {
+                easyNeeded = (int) Math.round(remainingNeeded * 0.3);
+                hardNeeded = (int) Math.round(remainingNeeded * 0.3);
+                medNeeded = remainingNeeded - easyNeeded - hardNeeded;
+            }
+
+            int deficit = 0;
+            int easyToTake = Math.min(easyNeeded, easyPool.size());
+            finalQuestions.addAll(easyPool.subList(0, easyToTake));
+            deficit += (easyNeeded - easyToTake);
+            availablePool.removeAll(easyPool.subList(0, easyToTake));
+
+            int medToTake = Math.min(medNeeded, mediumPool.size());
+            finalQuestions.addAll(mediumPool.subList(0, medToTake));
+            deficit += (medNeeded - medToTake);
+            availablePool.removeAll(mediumPool.subList(0, medToTake));
+
+            int hardToTake = Math.min(hardNeeded, hardPool.size());
+            finalQuestions.addAll(hardPool.subList(0, hardToTake));
+            deficit += (hardNeeded - hardToTake);
+            availablePool.removeAll(hardPool.subList(0, hardToTake));
+
+            if (deficit > 0 && !availablePool.isEmpty()) {
+                int finalFill = Math.min(deficit, availablePool.size());
+                finalQuestions.addAll(availablePool.subList(0, finalFill));
+            }
         }
 
-        // BƯỚC D: Chốt danh sách. Nhỡ AI sinh lố hoặc đề gốc không đủ câu, ta cắt cho vừa chuẩn
+        // Chốt sổ & Lưu trữ
         finalQuestions = finalQuestions.stream().limit(targetCount).collect(Collectors.toList());
-
-        // ĐẢO ĐỀ LẦN CUỐI: Giấu nhẹm đi việc câu nào là câu sai, câu nào là AI sinh
         Collections.shuffle(finalQuestions);
 
-        // ==============================================================
-        // KẾT THÚC PHẦN LÕI
-        // ==============================================================
-
-        // 2. Trích xuất ID và lưu CustomExam
-        String selectedIds = finalQuestions.stream()
-                .map(q -> String.valueOf(q.getId()))
-                .collect(Collectors.joining(","));
+        String selectedIds = finalQuestions.stream().map(q -> String.valueOf(q.getId())).collect(Collectors.joining(","));
 
         CustomExam customExam = new CustomExam();
         customExam.setTitle(customTitle);
         customExam.setTimeLimit(request.getTimeLimit());
-        customExam.setQuestionCount(finalQuestions.size()); // Lưu số lượng thực tế
+        customExam.setQuestionCount(finalQuestions.size());
         customExam.setSelectedQuestionIds(selectedIds);
         customExam.setOriginExam(originExam);
         customExam.setUserEmail(request.getUserEmail());
@@ -151,56 +213,82 @@ public class CustomExamService implements ICustomExamService {
         response.setTimeLimit(savedExam.getTimeLimit());
         response.setQuestionCount(savedExam.getQuestionCount());
 
-        // Trả thêm câu thông báo xịn sò
-        String msg = weakQuestions.isEmpty() ? "Tạo đề ngẫu nhiên thành công!" : "Đã tạo đề thi AI: Tập trung vào điểm yếu của bạn!";
+        String msg = "Tạo đề AI hoàn tất! Chế độ: " + (userLevel == 1 ? "Cơ bản" : (userLevel == 3 ? "Thử thách" : "Tiêu chuẩn"));
+        if (!weakQuestions.isEmpty()) msg += " (Đã kèm câu hỏi vá lỗ hổng)";
         response.setMessage(msg);
 
         return response;
     }
 
-    // Tính năng: Chấm điểm bài thi tùy chỉnh và Lưu lịch sử
-    @Transactional // Rollback nếu có lỗi xảy ra trong quá trình lưu
+    @Transactional
     @Override
     public CustomExamResultDTO submitCustomExam(SubmitCustomExamRequestDTO request) {
-        // 1. Tìm User và CustomExam trong Database để chuẩn bị tạo mối quan hệ
         User user = userRepository.findById(request.getUserId())
                 .orElseThrow(() -> new RuntimeException("Không tìm thấy tài khoản người dùng!"));
 
         CustomExam customExam = customExamRepository.findById(request.getCustomExamId())
                 .orElseThrow(() -> new RuntimeException("Không tìm thấy bài thi này!"));
 
-        // 2. Chấm điểm bài làm
         int correctCount = 0;
         int totalQuestions = request.getAnswers().size();
 
         for (AnswerSubmitDTO ans : request.getAnswers()) {
             Question q = questionRepository.findById(ans.getQuestionId()).orElse(null);
 
-            if (q != null && q.getAnswer() != null && ans.getSelectedOption() != null) {
-                // So sánh đáp án (Bỏ qua hoa thường và khoảng trắng thừa)
-                if (q.getAnswer().trim().equalsIgnoreCase(ans.getSelectedOption().trim())) {
+            if (q != null) {
+                // Kiểm tra đáp án đúng hay sai
+                boolean isCorrect = q.getAnswer() != null && ans.getSelectedOption() != null &&
+                        q.getAnswer().trim().equalsIgnoreCase(ans.getSelectedOption().trim());
+
+                if (isCorrect) {
                     correctCount++;
+                } else {
+                    // ==============================================================
+                    // 🧠 AI FEATURE: GHI CHÉP CÂU LÀM SAI VÀO BẢNG THỐNG KÊ ĐIỂM YẾU
+                    // ==============================================================
+                    if (user != null) {
+                        // Tìm xem câu này user đã từng làm sai trước đây chưa
+                        UserQuestionStat stat = userQuestionStatRepository
+                                .findByUserIdAndQuestionId(user.getId(), q.getId())
+                                .orElse(null);
+
+                        if (stat == null) {
+                            // Nếu sai lần đầu -> Tạo mới
+                            stat = new UserQuestionStat();
+                            stat.setUser(user);
+                            stat.setQuestion(q);
+                            stat.setExam(customExam.getOriginExam()); // Lưu theo ID bộ đề gốc
+                            stat.setWrongCount(1);
+                        } else {
+                            // Nếu đã từng sai rồi -> Tăng số lần sai lên
+                            int currentWrong = stat.getWrongCount();
+                            stat.setWrongCount(currentWrong + 1);
+                        }
+
+                        // Lưu vào DB
+                        userQuestionStatRepository.save(stat);
+                    }
+                    // ==============================================================
                 }
             }
         }
 
-        // 3. Quy đổi sang thang điểm 10 (Làm tròn 2 chữ số thập phân)
         double score = totalQuestions == 0 ? 0 : (double) correctCount / totalQuestions * 10;
         double finalScore = (double) Math.round(score * 100) / 100;
 
-        // 4. Lưu kết quả vào Database
+        // Lưu kết quả làm bài vào Database
         Result result = new Result();
         result.setUser(user);
-        result.setCustomExam(customExam); // Liên kết với đề thi tùy chỉnh
+        result.setCustomExam(customExam);
         result.setScore(finalScore);
         result.setCorrectAnswers(correctCount);
         result.setTotalQuestions(totalQuestions);
-
+        result.setTimeTaken(request.getTimeTakenSeconds()); // Lưu thời gian làm bài
         result.setActive(true);
 
         Result savedResult = resultRepository.save(result);
 
-        // 5. Đóng gói kết quả trả về cho Frontend
+        // Trả kết quả về cho Frontend
         CustomExamResultDTO resultDTO = new CustomExamResultDTO();
         resultDTO.setResultId(savedResult.getId());
         resultDTO.setTotalQuestions(totalQuestions);
@@ -210,27 +298,22 @@ public class CustomExamService implements ICustomExamService {
         return resultDTO;
     }
 
-    // Tính năng: Lấy chi tiết đề thi tùy chỉnh để User làm bài
+    // ✅ FIX: Thêm qDto.setAnswer(q.getAnswer()) để frontend nhận đúng đáp án
     @Override
     public CustomExamTakeDTO getCustomExamForTake(Long customExamId) {
-        // 1. Tìm Custom Exam trong DB
         CustomExam customExam = customExamRepository.findById(customExamId)
                 .orElseThrow(() -> new RuntimeException("Không tìm thấy đề thi này!"));
 
-        // 2. Tách chuỗi ID "8,2,1,10,9" thành danh sách các số Long
         String idsStr = customExam.getSelectedQuestionIds();
         List<Long> questionIds = Arrays.stream(idsStr.split(","))
                 .map(Long::parseLong)
                 .collect(Collectors.toList());
 
-        // 3. Query DB lấy tất cả các câu hỏi này lên (DB sẽ trả về lộn xộn hoặc tăng dần)
         List<Question> questionsFromDb = questionRepository.findAllById(questionIds);
 
-        // 4. Đưa vào Map để truy xuất nhanh theo ID
         Map<Long, Question> questionMap = questionsFromDb.stream()
                 .collect(Collectors.toMap(Question::getId, q -> q));
 
-        // 5. Duyệt lại theo đúng thứ tự của questionIds để tạo danh sách DTO
         List<QuestionClientDTO> questionClientDTOs = new ArrayList<>();
         for (Long id : questionIds) {
             Question q = questionMap.get(id);
@@ -239,11 +322,11 @@ public class CustomExamService implements ICustomExamService {
                 qDto.setId(q.getId());
                 qDto.setQuestionContent(q.getQuestion());
                 qDto.setOptions(q.getOptions());
+                qDto.setAnswer(q.getAnswer()); // ✅ FIX: Set đáp án đúng
                 questionClientDTOs.add(qDto);
             }
         }
 
-        // 6. Đóng gói vào DTO tổng
         CustomExamTakeDTO response = new CustomExamTakeDTO();
         response.setCustomExamId(customExam.getId());
         response.setTitle(customExam.getTitle());
@@ -266,14 +349,11 @@ public class CustomExamService implements ICustomExamService {
         customExamRepository.saveAll(customExams);
     }
 
-    // Tính năng: Xuất đề thi tùy chỉnh ra file Word (.docx)
     @Override
     public byte[] exportCustomExamToWord(Long customExamId) {
-        // 1. Tìm CustomExam
         CustomExam customExam = customExamRepository.findById(customExamId)
                 .orElseThrow(() -> new RuntimeException("Không tìm thấy đề thi tùy chỉnh!"));
 
-        // 2. Lấy danh sách câu hỏi THEO ĐÚNG THỨ TỰ ngẫu nhiên đã lưu
         String idsStr = customExam.getSelectedQuestionIds();
         List<Long> questionIds = Arrays.stream(idsStr.split(","))
                 .map(Long::parseLong)
@@ -290,11 +370,9 @@ public class CustomExamService implements ICustomExamService {
             }
         }
 
-        // 3. Sử dụng Apache POI để vẽ file Word
         try (XWPFDocument document = new XWPFDocument();
              ByteArrayOutputStream out = new ByteArrayOutputStream()) {
 
-            // Tiêu đề
             XWPFParagraph title = document.createParagraph();
             title.setAlignment(ParagraphAlignment.CENTER);
             XWPFRun titleRun = title.createRun();
@@ -302,35 +380,30 @@ public class CustomExamService implements ICustomExamService {
             titleRun.setFontSize(20);
             titleRun.setText("SMART EXAMS - ĐỀ THI: " + customExam.getTitle().toUpperCase());
 
-            // Thông tin thời gian & Số câu hỏi
             XWPFParagraph meta = document.createParagraph();
             meta.setAlignment(ParagraphAlignment.CENTER);
             XWPFRun metaRun = meta.createRun();
             metaRun.setItalic(true);
             metaRun.setText("Thời gian: " + customExam.getTimeLimit() + " phút | Tổng số câu: " + customExam.getQuestionCount());
 
-            document.createParagraph(); // Thêm một dòng trống
+            document.createParagraph();
 
-            // In nội dung câu hỏi
             int index = 1;
             for (Question q : orderedQuestions) {
-                // In câu hỏi
                 XWPFParagraph p = document.createParagraph();
                 XWPFRun qRun = p.createRun();
                 qRun.setBold(true);
                 qRun.setText("Câu " + (index++) + ": " + q.getQuestion());
 
-                // In các đáp án A, B, C, D
                 for (String opt : q.getOptions()) {
                     XWPFParagraph optP = document.createParagraph();
-                    optP.setIndentationLeft(400); // Thụt đầu dòng
+                    optP.setIndentationLeft(400);
                     XWPFRun optRun = optP.createRun();
                     optRun.setText(opt);
                 }
-                document.createParagraph(); // Khoảng trống giữa 2 câu
+                document.createParagraph();
             }
 
-            // Ghi dữ liệu ra mảng byte
             document.write(out);
             return out.toByteArray();
 
@@ -339,17 +412,13 @@ public class CustomExamService implements ICustomExamService {
         }
     }
 
-    // Tính năng: Lấy danh sách đề thi tùy chỉnh của User
     @Override
     public List<CustomExamSummaryDTO> getUserCustomExams(Long userId) {
-        // 1. Tìm User để lấy Email
         User user = userRepository.findById(userId)
                 .orElseThrow(() -> new RuntimeException("Không tìm thấy người dùng!"));
 
-        // 2. Tìm CustomExams theo Email
         List<CustomExam> exams = customExamRepository.findByUserEmailAndActiveTrueOrderByCreatedAtDesc(user.getEmail());
 
-        // 3. Map sang DTO
         List<CustomExamSummaryDTO> dtoList = new ArrayList<>();
         DateTimeFormatter formatter = DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm");
 

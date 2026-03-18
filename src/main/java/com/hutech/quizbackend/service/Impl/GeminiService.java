@@ -85,7 +85,7 @@ public class GeminiService implements IGeminiService {
 
     // ── Gọi AI và ghép kết quả với answeredList ───────────────────────────────
     private String callAI(String inputText, List<QuizParser.ParsedQuestion> answeredList) {
-        String url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" + apiKey;
+        String url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" + apiKey;
 
         try {
             StringBuilder sb = new StringBuilder();
@@ -212,36 +212,117 @@ public class GeminiService implements IGeminiService {
     // =========================================================================
     @Override
     public List<QuestionRequestDTO> generateAdaptiveQuestions(List<String> weakQuestions, int count) {
-        if (weakQuestions == null || weakQuestions.isEmpty()) return new ArrayList<>();
+        if (weakQuestions == null || weakQuestions.isEmpty()) {
+            System.out.println("[GeminiService] CẢNH BÁO: Không nhận được điểm yếu nào từ CustomExamService!");
+            return new ArrayList<>();
+        }
+
+        System.out.println("==================================================");
+        System.out.println("[GeminiService] BẮT ĐẦU GỌI AI SINH CÂU HỎI VÁ LỖI");
+        System.out.println("[GeminiService] Số lượng cần sinh: " + count);
+        System.out.println("[GeminiService] Danh sách câu sai: " + weakQuestions);
 
         String url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" + apiKey;
 
         try {
             StringBuilder prompt = new StringBuilder();
-            prompt.append("Bạn là giáo viên IT. Học sinh thường xuyên làm sai:\n");
+            prompt.append("Bạn là chuyên gia IT. Học sinh thường làm sai các kiến thức sau:\n");
             for (int i = 0; i < weakQuestions.size(); i++) {
-                prompt.append(i + 1).append(". ").append(weakQuestions.get(i)).append("\n");
+                prompt.append("- ").append(weakQuestions.get(i)).append("\n");
             }
-            prompt.append("\nSinh ĐÚNG ").append(count).append(" câu hỏi mới cùng phạm vi, mỗi câu 1 đáp án đúng, 3 đáp án sai hợp lý.\n");
-            prompt.append("Chỉ trả về JSON:\n[{\"question\":\"...\",\"options\":[\"A. ...\",\"B. ...\",\"C. ...\",\"D. ...\"],\"answer\":\"A\"}]");
+            prompt.append("\nHãy tạo ĐÚNG ").append(count).append(" câu hỏi trắc nghiệm MỚI TINH để kiểm tra lại các kiến thức trên.\n");
+            prompt.append("YÊU CẦU TỐI THƯỢNG: CHỈ TRẢ VỀ DUY NHẤT MẢNG JSON, KHÔNG GIẢI THÍCH, KHÔNG CHÀO HỎI!\n");
+            prompt.append("Định dạng chuẩn:\n[{\"question\":\"...\",\"options\":[\"A. ...\",\"B. ...\",\"C. ...\",\"D. ...\"],\"answer\":\"A\"}]");
 
             Map<String, Object> requestBody = Map.of(
                     "contents", List.of(Map.of("parts", List.of(Map.of("text", prompt.toString())))),
-                    "generationConfig", Map.of("temperature", 0.4)
+                    "generationConfig", Map.of("temperature", 0.7) // Tăng nhiệt độ để AI sáng tạo câu hỏi hay hơn
             );
+
             String rawResponse = new RestTemplate().postForObject(url, requestBody, String.class);
             JsonNode rootNode = objectMapper.readTree(rawResponse);
             String aiText = rootNode.path("candidates").get(0)
                     .path("content").path("parts").get(0).path("text").asText();
-            aiText = aiText.replaceAll("```json", "").replaceAll("```", "").trim();
+
+            System.out.println("[GeminiService] Phản hồi gốc từ AI:\n" + aiText);
+
+            // 🚀 BỌC THÉP: Cắt gọt mọi chữ thừa (VD: "Dưới đây là JSON...") chỉ lấy phần trong ngoặc vuông []
+            int startIdx = aiText.indexOf("[");
+            int endIdx = aiText.lastIndexOf("]");
+            if (startIdx != -1 && endIdx != -1 && startIdx < endIdx) {
+                aiText = aiText.substring(startIdx, endIdx + 1);
+            } else {
+                // Fallback nếu AI trả về object {} thay vì mảng []
+                startIdx = aiText.indexOf("{");
+                endIdx = aiText.lastIndexOf("}");
+                if (startIdx != -1 && endIdx != -1 && startIdx < endIdx) {
+                    aiText = aiText.substring(startIdx, endIdx + 1);
+                }
+            }
 
             JsonNode arrayNode = objectMapper.readTree(aiText);
-            return objectMapper.convertValue(arrayNode,
+
+            if (arrayNode.isObject() && arrayNode.has("questions")) {
+                arrayNode = arrayNode.get("questions");
+            } else if (arrayNode.isObject()) {
+                ArrayNode newArray = objectMapper.createArrayNode();
+                newArray.add(arrayNode);
+                arrayNode = newArray;
+            }
+
+            List<QuestionRequestDTO> result = objectMapper.convertValue(arrayNode,
                     objectMapper.getTypeFactory().constructCollectionType(List.class, QuestionRequestDTO.class));
 
+            System.out.println("[GeminiService] THÀNH CÔNG! Đã trích xuất " + result.size() + " câu hỏi mới.");
+            System.out.println("==================================================");
+            return result;
+
         } catch (Exception e) {
-            System.err.println("Lỗi sinh câu hỏi thích ứng: " + e.getMessage());
+            System.err.println("[GeminiService] THẤT BẠI: Lỗi khi xử lý phản hồi từ AI!");
+            e.printStackTrace();
             return new ArrayList<>();
+        }
+    }
+    // =========================================================================
+// PHÂN TÍCH LỆNH GIỌNG NÓI
+// =========================================================================
+    public String parseVoiceCommand(String transcript, int totalQuestions) {
+        String url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" + apiKey;
+
+        String prompt = String.format("""
+        Bạn là bộ phân tích lệnh cho ứng dụng thi trắc nghiệm.
+        Người dùng nói: "%s"
+        Tổng số câu hỏi: %d
+
+        Phân tích và trả về ĐÚNG 1 JSON (KHÔNG giải thích, KHÔNG markdown):
+
+        Chọn đáp án câu cụ thể: {"type":"SELECT","qIndex":0,"optIndex":1}
+        Chọn đáp án câu hiện tại: {"type":"SELECT_CURRENT","optIndex":2}
+        Đọc câu cụ thể:           {"type":"READ","qIndex":4}
+        Đọc câu hiện tại:         {"type":"READ_CURRENT"}
+        Câu tiếp theo:            {"type":"NEXT"}
+        Câu trước:                {"type":"PREV"}
+        Nhảy đến câu:             {"type":"GOTO","qIndex":6}
+        Đánh dấu câu:             {"type":"FLAG"}
+        Bỏ đánh dấu:              {"type":"UNFLAG"}
+        Nộp bài:                  {"type":"SUBMIT"}
+        Không hiểu:               {"type":"UNKNOWN"}
+
+        Lưu ý: qIndex bắt đầu từ 0 (câu 1 = qIndex 0). optIndex: A=0, B=1, C=2, D=3
+        """, transcript, totalQuestions);
+
+        try {
+            Map<String, Object> requestBody = Map.of(
+                    "contents", List.of(Map.of("parts", List.of(Map.of("text", prompt)))),
+                    "generationConfig", Map.of("temperature", 0.1)
+            );
+            String rawResponse = new RestTemplate().postForObject(url, requestBody, String.class);
+            JsonNode root = objectMapper.readTree(rawResponse);
+            String result = root.path("candidates").get(0)
+                    .path("content").path("parts").get(0).path("text").asText();
+            return result.replaceAll("```json", "").replaceAll("```", "").trim();
+        } catch (Exception e) {
+            return "{\"type\":\"UNKNOWN\"}";
         }
     }
 }

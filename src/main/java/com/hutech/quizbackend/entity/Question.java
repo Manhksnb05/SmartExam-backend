@@ -24,6 +24,9 @@ public class Question {
     @Column(columnDefinition = "TEXT")
     private String answer;
 
+    @Column(name = "difficulty", columnDefinition = "integer default 0")
+    private Integer difficulty = 0; // 0: Dễ, 1: Trung bình, 2: Khó (Mặc định là 0)
+
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "exam_id")
     @JsonBackReference // Phía con (Question) sẽ không gọi ngược lại cha (Exam)

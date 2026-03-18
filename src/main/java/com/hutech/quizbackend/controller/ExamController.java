@@ -146,4 +146,24 @@ public class ExamController {
             return ResponseEntity.badRequest().body(e.getMessage());
         }
     }
+
+    // 10. ✅ MỚI: Đổi tên bộ đề
+    @PatchMapping("/{id}/title")
+    public ResponseEntity<?> updateExamTitle(
+            @PathVariable Long id,
+            @RequestBody java.util.Map<String, String> body) {
+        try {
+            String newTitle = body.get("title");
+            if (newTitle == null || newTitle.trim().isEmpty()) {
+                return ResponseEntity.badRequest().body("Tên đề thi không được để trống!");
+            }
+            com.hutech.quizbackend.entity.Exam exam = examRepository.findByIdAndActiveTrue(id)
+                    .orElseThrow(() -> new RuntimeException("Không tìm thấy bộ đề!"));
+            exam.setTitle(newTitle.trim());
+            examRepository.save(exam);
+            return ResponseEntity.ok(java.util.Map.of("message", "Đã cập nhật tên bộ đề thành công!"));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(e.getMessage());
+        }
+    }
 }

@@ -32,6 +32,9 @@ public class Result {
     @Column(name = "total_questions")
     private Integer totalQuestions;
 
+    @Column(name = "time_taken")
+    private Integer timeTaken; // Lưu thời gian làm bài thực tế (tính bằng giây)
+
     @Column(name = "completed_at")
     private LocalDateTime completedAt = LocalDateTime.now();
 
